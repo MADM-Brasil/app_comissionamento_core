@@ -4,9 +4,8 @@ import multer from 'multer';
 import path from 'path';
 import fs from 'fs';
 import { pool } from '../services/db.js';
-import { searchContact, createContact } from '../services/hubspot.js';
 import teamsNotificador from '../suporte/teams_notificacoes.js';
-import { broadcastNotification } from './notificacoes.js'; // ✅ SSE
+import { broadcastNotification } from './notificacoes.js';
 
 const router = express.Router();
 
@@ -19,6 +18,9 @@ const STATUS_MAP = {
   suporte: 'Aguardando Suporte',
   aviso: 'Aviso',
   erro: 'Erro',
+  bloqueado: 'Bloqueado',
+  fora_pipeline: 'Fora do Pipeline',
+  no_pipeline: 'No Pipeline',
 };
 
 // ==================== CONFIGURAÇÃO DE UPLOAD ====================
@@ -38,7 +40,7 @@ const storage = multer.diskStorage({
 
 const upload = multer({
   storage,
-  limits: { fileSize: 10 * 1024 * 1024 }, // 10 MB por arquivo
+  limits: { fileSize: 10 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
     const allowed = /jpeg|jpg|png|gif|webp|pdf|doc|docx|xls|xlsx|txt|zip/;
     const ext = path.extname(file.originalname).toLowerCase();
@@ -47,35 +49,61 @@ const upload = multer({
   }
 });
 
-// ==================== REGISTO DE TICKET DE MOVIMENTAÇÃO ====================
+// ==================== REGISTRO DE TICKET DE MOVIMENTAÇÃO ====================
 router.post('/ticket-movimentacao', async (req, res) => {
   try {
     const {
-      crm_origem = 'CRM',
-      crm_lead_id: rawCrmLeadId = null,
-      nome_cliente_informado,
-      sobrenome_cliente_informado,
-      email_cliente_informado,
-      telefone_cliente_informado,
-      cpf_cliente_informado,
-      origem_cliente_informada,
-      tipo_solicitacao = 'Movimentação',
-      colaborador_origem_nome,
-      equipe_origem_nome,
-      colaborador_destino_nome,
-      equipe_destino_nome,
-      motivo_solicitacao: rawMotivo = null,
-      observacao_sales_ops: rawObs = null,
-      status_mapeamento = 'pendente',
-    } = req.body;
+  crm_origem = 'CRM',
+  crm_lead_id: rawCrmLeadId = null,
+  lead_id: rawLeadId = null,
+  nome_cliente_informado,
+  sobrenome_cliente_informado,
+  email_cliente_informado,
+  telefone_cliente_informado,
+  cpf_cliente_informado,
+  origem_cliente_informada,
+  tipo_solicitacao = 'Movimentação',
+  colaborador_origem_nome,
+  colaborador_origem_email,
+  equipe_origem_nome,
+  colaborador_destino_nome,
+  colaborador_destino_email,
+  equipe_destino_nome,
+  motivo_solicitacao: rawMotivo = null,
+  observacao_sales_ops: rawObs = null,
+  status_mapeamento = 'pendente',
+  idempotency_key,
+} = req.body;
 
-    if (!nome_cliente_informado || !sobrenome_cliente_informado || !email_cliente_informado) {
-      return res.status(400).json({ success: false, error: 'Nome, sobrenome e e‑mail são obrigatórios.' });
+    // ---------- Validação de campos ----------
+    if (!nome_cliente_informado || !sobrenome_cliente_informado || !telefone_cliente_informado) {
+      return res.status(400).json({ success: false, error: 'Nome, sobrenome e telefone são obrigatórios.' });
+    }
+
+    // ---------- Verificação de idempotência ----------
+    if (idempotency_key) {
+      const existing = await pool.query(
+        `SELECT id_ticket_movimentacao FROM app_comissionamento.tickets_movimentacao_lead
+         WHERE observacao_sales_ops IS NOT NULL
+           AND LTRIM(observacao_sales_ops) LIKE '{%'
+           AND observacao_sales_ops::jsonb->>'idempotency_key' = $1
+         LIMIT 1`,
+        [idempotency_key]
+      );
+      if (existing.rowCount > 0) {
+        console.log(`🔁 Requisição duplicada detectada (idempotency_key: ${idempotency_key}). Retornando ticket existente.`);
+        return res.status(200).json({
+          success: true,
+          message: 'Ticket de movimentação já registrado anteriormente.',
+          id: existing.rows[0].id_ticket_movimentacao,
+        });
+      }
     }
 
     const toNull = (val) => (val === 'null' || val === null || val === undefined ? null : val);
     const crmLeadId = toNull(rawCrmLeadId);
-    const observacao = toNull(rawObs);
+    const leadId = toNull(rawLeadId);
+    const observacaoInicial = toNull(rawObs);
 
     let motivoSolicitacao = toNull(rawMotivo);
     if (motivoSolicitacao === null) motivoSolicitacao = '';
@@ -83,29 +111,32 @@ router.post('/ticket-movimentacao', async (req, res) => {
     const cpfNumerico = cpf_cliente_informado ? cpf_cliente_informado.replace(/\D/g, '') : null;
     const cpfFinal = cpfNumerico && cpfNumerico.length > 11 ? cpfNumerico.substring(0, 11) : cpfNumerico;
 
-    const descricao = `Cliente: ${nome_cliente_informado} ${sobrenome_cliente_informado} | E‑mail: ${email_cliente_informado} | Origem: ${origem_cliente_informada || 'N/A'} | Destino: ${colaborador_destino_nome} (${equipe_destino_nome || 'N/A'})`;
-
+    // 1. Criar ticket base na tabela tickets_suporte
+    const descricaoBase = `Movimentação de lead solicitada por ${colaborador_origem_nome || 'N/A'}`;
     const metadadosBase = {
+      assunto: 'Movimentacao',
       origem_colaborador: colaborador_origem_nome || '',
       origem_equipe: equipe_origem_nome || '',
       destino_colaborador: colaborador_destino_nome || '',
       destino_equipe: equipe_destino_nome || '',
+      solicitante_email: colaborador_origem_email || req.user?.email || '',
+      solicitante_nome: colaborador_origem_nome || req.user?.nome || '',
     };
 
-    // 1. Criar ticket base na tabela tickets_suporte
     const baseResult = await pool.query(
       `INSERT INTO app_comissionamento.tickets_suporte 
          (solicitante_usuario_id, categoria, tipo_ticket, prioridade, status, titulo, descricao, origem_ticket, encaminhado_em, atualizado_em, metadados)
        VALUES ($1, 'Movimentacao', 'Movimentacao', 'NORMAL', 'Aberto', 'movimentacao card', $2, 'suporte comissionamento', NOW(), NOW(), $3)
        RETURNING id_ticket`,
-      [PLACEHOLDER_UUID, descricao, JSON.stringify(metadadosBase)]
+      [PLACEHOLDER_UUID, descricaoBase, JSON.stringify(metadadosBase)]
     );
     const ticketId = baseResult.rows[0].id_ticket;
 
-    // 2. Inserir na tabela de movimentação
-    const insertQuery = `
+    // 2. Inserir o registro específico da movimentação
+    const insertMovimentacaoQuery = `
       INSERT INTO app_comissionamento.tickets_movimentacao_lead (
         ticket_id,
+        lead_id,
         crm_origem, crm_lead_id,
         nome_cliente_informado, sobrenome_cliente_informado,
         email_cliente_informado, telefone_cliente_informado,
@@ -118,13 +149,14 @@ router.post('/ticket-movimentacao', async (req, res) => {
         atualizado_em
       ) VALUES (
         $1, $2, $3, $4, $5, $6, $7, $8, $9,
-        $10, $11, $12, $13, $14, NOW()
+        $10, $11, $12, $13, $14, $15, NOW()
       )
       RETURNING id_ticket_movimentacao
     `;
 
-    const values = [
+    const movValues = [
       ticketId,
+      leadId,
       crm_origem, crmLeadId,
       nome_cliente_informado, sobrenome_cliente_informado,
       email_cliente_informado, telefone_cliente_informado || null,
@@ -133,41 +165,18 @@ router.post('/ticket-movimentacao', async (req, res) => {
       colaborador_destino_nome,
       motivoSolicitacao,
       status_mapeamento,
-      observacao,
+      observacaoInicial,
     ];
 
-    const result = await pool.query(insertQuery, values);
+    const movResult = await pool.query(insertMovimentacaoQuery, movValues);
+    const movimentacaoId = movResult.rows[0].id_ticket_movimentacao;
 
-    // Integração com HubSpot (em background)
-    (async () => {
-      try {
-        let contact = await searchContact({
-          email: email_cliente_informado,
-          phone: telefone_cliente_informado,
-          cpf: cpf_cliente_informado,
-        });
-
-        if (!contact) {
-          contact = await createContact({
-            firstName: nome_cliente_informado,
-            lastName: sobrenome_cliente_informado,
-            email: email_cliente_informado,
-            phone: telefone_cliente_informado,
-            cpf: cpf_cliente_informado,
-          });
-          console.log('✅ HubSpot: contacto criado com ID', contact.id);
-        } else {
-          console.log('ℹ️ HubSpot: contacto já existe (ID', contact.id, ')');
-        }
-      } catch (hubspotError) {
-        console.error('❌ HubSpot: erro na integração:', hubspotError.message);
-      }
-    })();
-
-    return res.status(201).json({
+    // ==================== RESPOSTA IMEDIATA – FILA ASSUME ====================
+    return res.status(202).json({
       success: true,
-      message: 'Ticket de movimentação registrado com sucesso.',
-      id: result.rows[0].id_ticket_movimentacao,
+      message: 'Solicitação de movimentação registrada e enfileirada para processamento.',
+      id: movimentacaoId,
+      status_mapeamento: 'pendente',
     });
   } catch (err) {
     console.error('Erro ao registrar ticket:', err);
@@ -175,7 +184,7 @@ router.post('/ticket-movimentacao', async (req, res) => {
   }
 });
 
-// ==================== REGISTO DE TICKET DE SUPORTE (REPORTAR) COM UPLOAD ====================
+// ==================== REGISTRO DE TICKET DE SUPORTE (REPORTAR) COM UPLOAD ====================
 router.post('/ticket-suporte', upload.array('arquivos', 5), async (req, res) => {
   try {
     const {
@@ -198,7 +207,6 @@ router.post('/ticket-suporte', upload.array('arquivos', 5), async (req, res) => 
     const solicitanteEmail = solicitante_email || req.user?.email || '';
     const equipeNome = req.user?.equipe || equipe_nome || '';
 
-    // Processa arquivos enviados
     const arquivos = req.files || [];
     const baseUrl = `${req.protocol}://${req.get('host')}/uploads/suporte/`;
     const arquivosComUrl = arquivos.map(file => ({
@@ -206,7 +214,6 @@ router.post('/ticket-suporte', upload.array('arquivos', 5), async (req, res) => 
       url: baseUrl + file.filename,
     }));
 
-    // Monta string markdown para links de anexos
     const anexosMarkdown = arquivosComUrl.length > 0
       ? arquivosComUrl.map(a => `[${a.nome}](${a.url})`).join(', ')
       : 'Nenhum anexo';
@@ -220,7 +227,6 @@ router.post('/ticket-suporte', upload.array('arquivos', 5), async (req, res) => 
       assunto: assunto,
     };
 
-    // Insere no banco: categoria agora recebe o assunto
     const result = await pool.query(
       `INSERT INTO app_comissionamento.tickets_suporte 
          (solicitante_usuario_id, categoria, tipo_ticket, prioridade, status, titulo, descricao, origem_ticket, encaminhado_em, atualizado_em, metadados)
@@ -228,14 +234,13 @@ router.post('/ticket-suporte', upload.array('arquivos', 5), async (req, res) => 
        RETURNING id_ticket`,
       [
         PLACEHOLDER_UUID,
-        assunto,                // categoria = assunto
+        assunto,
         titulo.trim(),
         descricao,
         JSON.stringify(metadados),
       ]
     );
 
-    // Envia notificação para o Power Automate com anexos em markdown
     teamsNotificador.enviar({
       titulo: titulo.trim(),
       assunto,
@@ -264,11 +269,12 @@ router.post('/ticket-suporte', upload.array('arquivos', 5), async (req, res) => 
 // ==================== LISTAGEM DE TICKETS DE MOVIMENTAÇÃO ====================
 router.get('/tickets-movimentacao', async (req, res) => {
   try {
-    const { status_mapeamento, colaborador_origem_nome, todos } = req.query;
+    const { status_mapeamento, colaborador_origem_nome, todos, solicitante_email } = req.query;
     let query = `
       SELECT 
         tml.id_ticket_movimentacao,
         tml.ticket_id,
+        tml.lead_id,
         tml.crm_origem,
         tml.tipo_solicitacao,
         tml.nome_cliente_informado,
@@ -283,7 +289,9 @@ router.get('/tickets-movimentacao', async (req, res) => {
         COALESCE(ts.metadados->>'destino_equipe', '') AS equipe_destino_nome,
         tml.status_mapeamento,
         tml.observacao_sales_ops,
-        tml.atualizado_em AS criado_em
+        tml.motivo_solicitacao,
+        tml.atualizado_em AS criado_em,
+        tml.analisado_em
       FROM app_comissionamento.tickets_movimentacao_lead tml
       LEFT JOIN app_comissionamento.tickets_suporte ts ON tml.ticket_id = ts.id_ticket
       WHERE 1=1
@@ -296,8 +304,13 @@ router.get('/tickets-movimentacao', async (req, res) => {
       params.push(status_mapeamento);
     }
 
-    if (todos !== '1') {
-      if (colaborador_origem_nome) {
+    if (todos === '1') {
+      query += ` AND (tml.status_mapeamento != 'concluido' OR tml.analisado_em IS NOT NULL)`;
+    } else {
+      if (solicitante_email) {
+        query += ` AND LOWER(TRIM(COALESCE(ts.metadados->>'solicitante_email', ''))) = LOWER(TRIM($${paramIndex++}))`;
+        params.push(solicitante_email);
+      } else if (colaborador_origem_nome) {
         query += ` AND LOWER(TRIM(COALESCE(ts.metadados->>'origem_colaborador', ''))) = LOWER(TRIM($${paramIndex++}))`;
         params.push(colaborador_origem_nome);
       } else {
@@ -329,7 +342,8 @@ router.get('/ticket-suporte', async (req, res) => {
         COALESCE(metadados->>'solicitante_nome', '') AS solicitante_nome,
         COALESCE(metadados->>'equipe_nome', '') AS equipe_nome,
         COALESCE(metadados->>'observacao_sales_ops', '') AS observacao_sales_ops,
-        encaminhado_em AS criado_em
+        encaminhado_em AS criado_em,
+        concluido_em
       FROM app_comissionamento.tickets_suporte
       WHERE tipo_ticket = 'Reporte'
     `;
@@ -361,61 +375,118 @@ router.patch('/tickets-movimentacao/:id', async (req, res) => {
     const { id } = req.params;
     const { status_mapeamento, observacao_sales_ops } = req.body;
 
-    if (!status_mapeamento && observacao_sales_ops === undefined) {
+    if (status_mapeamento === undefined && observacao_sales_ops === undefined) {
       return res.status(400).json({ success: false, error: 'Nenhum campo para atualizar.' });
     }
 
-    const setClauses = [];
-    const values = [];
-    let paramIndex = 1;
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
 
-    if (status_mapeamento) {
-      setClauses.push(`status_mapeamento = $${paramIndex++}`);
-      values.push(status_mapeamento);
+      const setClauses = [];
+      const values = [];
+      let paramIndex = 1;
+
+      if (status_mapeamento !== undefined) {
+        setClauses.push(`status_mapeamento = $${paramIndex++}`);
+        values.push(status_mapeamento);
+        setClauses.push(`analisado_em = NOW()`);
+      }
+
+      if (observacao_sales_ops !== undefined) {
+        const current = await client.query(
+          `SELECT observacao_sales_ops FROM app_comissionamento.tickets_movimentacao_lead WHERE id_ticket_movimentacao = $1`,
+          [id]
+        );
+
+        let jsonAtual = {};
+        if (current.rowCount > 0 && current.rows[0].observacao_sales_ops) {
+          try {
+            jsonAtual = JSON.parse(current.rows[0].observacao_sales_ops);
+          } catch (e) {
+            jsonAtual = {};
+          }
+        }
+
+        jsonAtual.observacao = observacao_sales_ops;
+        setClauses.push(`observacao_sales_ops = $${paramIndex++}`);
+        values.push(JSON.stringify(jsonAtual));
+      }
+
+      setClauses.push(`atualizado_em = NOW()`);
+
+      const updateMovimentacaoQuery = `
+        UPDATE app_comissionamento.tickets_movimentacao_lead
+        SET ${setClauses.join(', ')}
+        WHERE id_ticket_movimentacao = $${paramIndex}
+        RETURNING id_ticket_movimentacao, ticket_id
+      `;
+      values.push(id);
+
+      const movResult = await client.query(updateMovimentacaoQuery, values);
+      if (movResult.rowCount === 0) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ success: false, error: 'Ticket de movimentação não encontrado.' });
+      }
+
+      // Sincroniza status com tickets_suporte
+      if (status_mapeamento !== undefined) {
+        const ticketId = movResult.rows[0].ticket_id;
+        const mappedStatus = STATUS_MAP[status_mapeamento] || status_mapeamento;
+
+        if (status_mapeamento === 'concluido') {
+          await client.query(
+            `UPDATE app_comissionamento.tickets_suporte
+             SET status = $1, atualizado_em = NOW(), concluido_em = NOW()
+             WHERE id_ticket = $2`,
+            [mappedStatus, ticketId]
+          );
+        } else {
+          await client.query(
+            `UPDATE app_comissionamento.tickets_suporte
+             SET status = $1, atualizado_em = NOW()
+             WHERE id_ticket = $2`,
+            [mappedStatus, ticketId]
+          );
+        }
+      }
+
+      // Notificação SSE
+      try {
+        const ticketInfo = await client.query(
+          `SELECT ts.titulo, ts.metadados->>'solicitante_email' AS solicitante_email
+           FROM app_comissionamento.tickets_suporte ts
+           JOIN app_comissionamento.tickets_movimentacao_lead tml ON tml.ticket_id = ts.id_ticket
+           WHERE tml.id_ticket_movimentacao = $1`,
+          [id]
+        );
+
+        if (ticketInfo.rowCount > 0) {
+          const { titulo, solicitante_email } = ticketInfo.rows[0];
+          if (solicitante_email) {
+            const statusLabel = status_mapeamento || 'inalterado';
+            const obsLabel = observacao_sales_ops !== undefined ? observacao_sales_ops : 'inalterada';
+            broadcastNotification({
+              tipo: 'info',
+              titulo: '📢 Atualização da movimentação',
+              mensagem: `Sua solicitação de movimentação "${titulo}" foi atualizada.\nNovo status: ${statusLabel}.\nObservação: ${obsLabel}`,
+              destinatario: solicitante_email,
+              data: new Date().toISOString(),
+            });
+          }
+        }
+      } catch (notifErr) {
+        console.error('Erro ao enviar notificação SSE (movimentação):', notifErr);
+      }
+
+      await client.query('COMMIT');
+      return res.json({ success: true, message: 'Ticket atualizado com sucesso.' });
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
     }
-    if (observacao_sales_ops !== undefined) {
-      setClauses.push(`observacao_sales_ops = $${paramIndex++}`);
-      values.push(observacao_sales_ops);
-    }
-
-    setClauses.push(`atualizado_em = NOW()`);
-
-    const updateMovimentacaoQuery = `
-      UPDATE app_comissionamento.tickets_movimentacao_lead
-      SET ${setClauses.join(', ')}
-      WHERE id_ticket_movimentacao = $${paramIndex}
-      RETURNING ticket_id
-    `;
-    values.push(id);
-
-    const movResult = await pool.query(updateMovimentacaoQuery, values);
-    if (movResult.rowCount === 0) {
-      return res.status(404).json({ success: false, error: 'Ticket de movimentação não encontrado.' });
-    }
-
-    const ticketId = movResult.rows[0].ticket_id;
-
-    if (status_mapeamento) {
-      const statusSuporte = STATUS_MAP[status_mapeamento] || 'Aberto';
-      await pool.query(
-        `UPDATE app_comissionamento.tickets_suporte 
-         SET status = $1, atualizado_em = NOW()
-         WHERE id_ticket = $2`,
-        [statusSuporte, ticketId]
-      );
-    }
-
-    if (observacao_sales_ops && observacao_sales_ops.trim() !== '') {
-      await pool.query(
-        `UPDATE app_comissionamento.tickets_suporte 
-         SET descricao = descricao || ' | Observação (' || to_char(NOW(), 'DD/MM/YYYY HH24:MI') || '): ' || $1,
-             atualizado_em = NOW()
-         WHERE id_ticket = $2`,
-        [observacao_sales_ops, ticketId]
-      );
-    }
-
-    return res.json({ success: true, message: 'Ticket atualizado com sucesso (movimentação e ticket base).' });
   } catch (err) {
     console.error('Erro ao atualizar ticket:', err);
     return res.status(500).json({ success: false, error: 'Erro interno do servidor.' });
@@ -439,10 +510,12 @@ router.patch('/tickets-suporte/:id', async (req, res) => {
     if (status) {
       setClauses.push(`status = $${paramIndex++}`);
       values.push(status);
+      if (status === 'CONCLUÍDO') {
+        setClauses.push(`concluido_em = NOW()`);
+      }
     }
 
     if (observacao_sales_ops !== undefined) {
-      // Atualiza o JSON metadados -> observacao_sales_ops
       setClauses.push(`metadados = jsonb_set(COALESCE(metadados, '{}'), '{observacao_sales_ops}', to_jsonb($${paramIndex++}::text))`);
       values.push(observacao_sales_ops);
     }
@@ -462,40 +535,67 @@ router.patch('/tickets-suporte/:id', async (req, res) => {
       return res.status(404).json({ success: false, error: 'Ticket de suporte não encontrado.' });
     }
 
-    // ✅ Lógica de notificação SSE para status finais
-    if (status && ['CONCLUÍDO', 'BLOQUEADO', 'ANALISE'].includes(status)) {
-      try {
-        const ticketResult = await pool.query(
-          `SELECT titulo, metadados->>'solicitante_email' AS solicitante_email
-           FROM app_comissionamento.tickets_suporte
-           WHERE id_ticket = $1`,
-          [id]
-        );
+    // Notificação SSE
+    try {
+      const ticketResult = await pool.query(
+        `SELECT titulo, metadados->>'solicitante_email' AS solicitante_email
+         FROM app_comissionamento.tickets_suporte
+         WHERE id_ticket = $1`,
+        [id]
+      );
 
-        if (ticketResult.rows.length > 0) {
-          const { titulo, solicitante_email } = ticketResult.rows[0];
-          if (solicitante_email) {
-            broadcastNotification({
-              tipo: 'info',
-              titulo: '📢 Atualização da solicitação',
-              mensagem: `Sua solicitação "${titulo}" foi marcada como ${status}.`,
-              destinatario: solicitante_email,
-              data: new Date().toISOString(),
-            });
-            console.log(`🔔 Notificação enviada para ${solicitante_email} sobre o ticket ${id}`);
-          } else {
-            console.warn(`⚠️ E-mail do solicitante não encontrado para o ticket ${id}`);
-          }
+      if (ticketResult.rows.length > 0) {
+        const { titulo, solicitante_email } = ticketResult.rows[0];
+        if (solicitante_email) {
+          const statusLabel = status || 'inalterado';
+          const obsLabel = observacao_sales_ops !== undefined ? observacao_sales_ops : 'inalterada';
+          broadcastNotification({
+            tipo: 'info',
+            titulo: '📢 Atualização da solicitação',
+            mensagem: `Sua solicitação "${titulo}" foi atualizada.\nNovo status: ${statusLabel}.\nObservação: ${obsLabel}`,
+            destinatario: solicitante_email,
+            data: new Date().toISOString(),
+          });
         }
-      } catch (notifErr) {
-        console.error('Erro ao enviar notificação SSE:', notifErr);
       }
+    } catch (notifErr) {
+      console.error('Erro ao enviar notificação SSE (suporte):', notifErr);
     }
 
     return res.json({ success: true, message: 'Ticket de suporte atualizado com sucesso.' });
   } catch (err) {
     console.error('Erro ao atualizar ticket de suporte:', err);
     return res.status(500).json({ success: false, error: 'Erro interno do servidor.' });
+  }
+});
+
+// ==================== REPROCESSAR TICKET DE MOVIMENTAÇÃO ====================
+router.post('/tickets-movimentacao/:id/reprocessar', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const result = await pool.query(
+      `SELECT observacao_sales_ops FROM app_comissionamento.tickets_movimentacao_lead WHERE id_ticket_movimentacao = $1`,
+      [id]
+    );
+    if (result.rowCount === 0) {
+      return res.status(404).json({ success: false, error: 'Ticket não encontrado' });
+    }
+
+    let obs = {};
+    try { obs = JSON.parse(result.rows[0].observacao_sales_ops || '{}'); } catch { obs = {}; }
+    delete obs.processado;
+
+    await pool.query(
+      `UPDATE app_comissionamento.tickets_movimentacao_lead
+       SET status_mapeamento = 'pendente', observacao_sales_ops = $1, atualizado_em = NOW()
+       WHERE id_ticket_movimentacao = $2`,
+      [JSON.stringify(obs), id]
+    );
+
+    return res.json({ success: true, message: 'Ticket reenfileirado.' });
+  } catch (err) {
+    console.error('Erro ao reprocessar:', err);
+    return res.status(500).json({ success: false, error: 'Erro interno' });
   }
 });
 

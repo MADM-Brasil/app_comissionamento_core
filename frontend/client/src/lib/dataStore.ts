@@ -195,7 +195,7 @@ function getDateRangeFromPeriod(period: Period, customStart?: string, customEnd?
 // ESTADOS INICIAIS
 // ============================================================
 const initialKpiData: KpiData = {
-  comissaoMes: { value: 0, target: 0, unit: 'R$', label: 'Comissão do Mês' },
+  comissaoMes: { value: 0, target: 0, unit: 'R$', label: 'Estimativa do Mês' },
   vendasFechadas: { value: 0, target: 0, unit: '', label: 'Vendas Fechadas' },
   protocolados: { value: 0, target: 0, unit: '', label: 'Protocolados' },
   taxaConversao: { value: 0, target: 0, unit: '%', label: 'Taxa de Conversão' },
@@ -253,7 +253,7 @@ const initialInsightCards: InsightCard[] = [];
 const initialRawMetrics: RawMetrics = { emitidos: 0, assinados: 0, protocolados: 0, ganhos: 0, perdidos: 0 };
 const initialTabelaComissoes: TabelaComissaoItem[] = [];
 const initialCampaigns: Campaign[] = [];
- 
+
 // ============================================================
 // INTERFACE DA STORE
 // ============================================================
@@ -273,6 +273,9 @@ interface AppStore {
   loadTabelaComissoes: () => Promise<void>;
   campaigns: Campaign[];
   loadCampaigns: (mes?: string) => Promise<void>;
+  // Novo estado para o colaborador selecionado (e-mail) – usado para ocultar/bloquear no DashboardLayout
+  selectedCollaboratorEmail: string | null;
+  setSelectedCollaboratorEmail: (email: string | null) => void;
 
   resetStore: () => void;
   setKpiData: (data: KpiData) => void; setBonusData: (data: BonusData) => void; setWeeklyPerformance: (data: WeeklyPerformance[]) => void;
@@ -355,6 +358,9 @@ export const useAppStore = create<AppStore>()(
       toggleHideValues: () => set((state) => ({ hideValues: !state.hideValues })),
       tabelaComissoes: initialTabelaComissoes,
       campaigns: initialCampaigns,
+      // Novo estado e setter
+      selectedCollaboratorEmail: null,
+      setSelectedCollaboratorEmail: (email) => set({ selectedCollaboratorEmail: email }),
 
       // ========== PERÍODO ==========
       setPeriod: (period) => {
@@ -410,6 +416,7 @@ export const useAppStore = create<AppStore>()(
         hideValues: true,
         tabelaComissoes: initialTabelaComissoes,
         campaigns: initialCampaigns,
+        selectedCollaboratorEmail: null,
       }),
 
       // ========== SETTERS BÁSICOS ==========
@@ -693,7 +700,6 @@ export const useAppStore = create<AppStore>()(
       loadCollaboratorsAndMetrics: async (equipeNome, colaboradorNome, colaboradorId, produto) => {
         if (get().collaborators.length === 0) { await get().loadCollaborators(); await get().loadEquipeConfigs(); }
         await get().loadTabelaComissoes();
-        // NOVO: carrega campanhas do mês atual
         const mesAtual = get().currentStartDate?.substring(0, 7);
         if (mesAtual) await get().loadCampaigns(mesAtual);
         await get().loadMetricsForPeriod({ equipeNome, colaboradorNome, colaboradorId, produto });

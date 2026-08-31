@@ -46,11 +46,10 @@ function mapGrupoToProduto(cargo, classificacaoOperacional) {
 }
 
 const EXCLUDED_TEAMS = [
-  'Equipe SAC', 'Sales Ops', 'Equipe', 'Equipe Lucilene', 'Equipe SDR','Equipe Camila',
-  'Equipe Erica', 'Equipe Lucas', 'Equipe Irene', 'Equipe Maria Eduarda', 'SalesOps',
-  'Equipe Murilo Balsalobre', 'Comercial', 'Backoffice', 'CEO', 'Prontuário','BackOffice',
-  'Equipe Leonardo Cardoso', 'Equipe Julia', 'Equipe Leticia', 'Dr. Felipe Marx','Administrativo',
-  'Equipe Thales','Financeiro'
+  'Coordenacao Closer', 'Departamento Backoffice', 'Diretoria','Departamento Marketing',
+  'Equipe Ariana', 'Equipe Erika', 'Equipe Leonardo', 'Equipe Leticia', 'Equipe Michael','Equipe Erica',
+  'Equipe Thales', 'Equipe Yuri', 'Equipe Rodolfo','Equipe Jennifer','Equipe Natalia','Equipe Maria Eduarda',
+  'Equipe Reciclagem','','Equipe','Equipe Camila','Sales Ops'
 ];
 
 function normalize(str) {
@@ -80,7 +79,8 @@ router.get('/collaborators', requireAuth, async (req, res) => {
         ON LOWER(TRIM(c.email)) = LOWER(TRIM(m.email))
       WHERE m.data_metrica::date = $1::date
         AND (c.nome_equipe IS NULL OR TRIM(c.nome_equipe) != '')
-        AND (c.status IS NULL OR LOWER(c.status) != 'desativado')
+        -- Exclui apenas colaboradores desativados
+        AND (c.status IS NULL OR LOWER(TRIM(c.status)) != 'desativado')
         AND (c.cargo IS NULL OR LOWER(c.cargo) != 'desativado')
         AND (m.classificacao_operacional IS NOT NULL AND TRIM(m.classificacao_operacional) != '')
     `;
@@ -181,7 +181,8 @@ router.get('/equipes', requireAuth, async (req, res) => {
          ON LOWER(TRIM(c.email)) = LOWER(TRIM(m.email))
        WHERE m.data_metrica::date = $1::date
          AND (c.nome_equipe IS NULL OR TRIM(c.nome_equipe) != '')
-         AND (c.status IS NULL OR LOWER(c.status) != 'desativado')
+         -- Exclui apenas equipes de colaboradores desativados
+         AND (c.status IS NULL OR LOWER(TRIM(c.status)) != 'desativado')
          AND (c.cargo IS NULL OR LOWER(c.cargo) != 'desativado')`,
       [dataMetrica]
     );

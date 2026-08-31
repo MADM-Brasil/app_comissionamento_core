@@ -30,11 +30,10 @@ import {
 // CONSTANTES DE EXCLUSÃO
 // ============================================================
 const EXCLUDED_TEAMS = [
-  'Equipe SAC', 'Sales Ops', 'Equipe', 'Equipe Lucilene', 'Equipe SDR','Equipe Camila',
-  'Equipe Erica', 'Equipe Lucas', 'Equipe Irene', 'Equipe Maria Eduarda', 'SalesOps',
-  'Equipe Murilo Balsalobre', 'Comercial', 'Backoffice', 'CEO', 'Prontuário','BackOffice',
-  'Equipe Leonardo Cardoso', 'Equipe Julia', 'Equipe Leticia', 'Dr. Felipe Marx','Administrativo',
-  'Equipe Thales','Financeiro', 'Equipe Reciclagem'
+  'Coordenacao Closer', 'Departamento Backoffice', 'Diretoria','Departamento Marketing',
+  'Equipe Ariana', 'Equipe Erika', 'Equipe Leonardo', 'Equipe Leticia', 'Equipe Michael','Equipe Erica',
+  'Equipe Thales', 'Equipe Yuri', 'Equipe Rodolfo','Equipe Jennifer','Equipe Natalia','Equipe Maria Eduarda',
+  'Equipe Reciclagem','','Equipe','Equipe Camila','Sales Ops', 'Departamento Comercial', 'Equipe Gabriela Toledo'
 ];
 
 const EXCLUDED_CARGOS_FOR_DISPLAY = [
@@ -767,7 +766,7 @@ export default function Home() {
   }, [currentUserData, tabelaComissoes]);
 
   const kpiCards = [
-    { label: "Comissão do Mês", value: userCommission, target: comissaoTarget, unit: "R$", icon: DollarSign, color: "#2F6FED", simple: true },
+    { label: "Estimativa do Mês", value: userCommission, target: comissaoTarget, unit: "R$", icon: DollarSign, color: "#2F6FED", simple: true },
     { label: "Vendas Fechadas", value: totals.assinados, target: totalTargetAssinados, unit: "", icon: FileCheck, color: "#16A34A", simple: false },
     { label: "Protocolados", value: totals.protocolados, target: 1200, unit: "", icon: BarChart2, color: "#8B5CF6", simple: false },
     { label: "Taxa de Conversão", value: conversaoPercentual, target: 100, unit: "%", icon: TrendingUp, color: "#EA8C1D", simple: false },

@@ -31,6 +31,7 @@ import { cn } from "@/lib/utils";
 import { API_BASE } from "@/lib/api";
 import logoBranca from "./img/LogoBranca.png";
 import { getUserPermissions } from "@/lib/accessControl";
+import { useAccessControl } from "@/hooks/useAccessControl";
 
 type NavChild = { path: string; label: string; icon: React.ComponentType<any> };
 type NavItem =
@@ -70,6 +71,30 @@ export default function DashboardLayout({ children, title, subtitle }: Dashboard
     loadCollaborators,
     collaborators,
   } = useAppStore();
+
+  // Obtém nível de acesso
+  const { getAccessLevel, LEVELS } = useAccessControl();
+  const userLevel = getAccessLevel();
+  const isSuperAdmin = userLevel === LEVELS.SUPER_ADMIN;
+
+  // Obtém o e-mail do colaborador selecionado (armazenado no dataStore)
+  const selectedCollaboratorEmail = useAppStore(
+    (state) => (state as any).selectedCollaboratorEmail ?? null
+  );
+
+  // Determina se o colaborador filtrado é diferente do usuário logado,
+  // EXCETO se o usuário for SUPER_ADMIN (mantém visualização livre).
+  const isViewingOtherCollaborator = !isSuperAdmin &&
+    !!selectedCollaboratorEmail &&
+    !!currentUser?.email &&
+    selectedCollaboratorEmail !== currentUser.email;
+
+  // Força hideValues = true enquanto estiver visualizando outro colaborador
+  useEffect(() => {
+    if (isViewingOtherCollaborator && !hideValues) {
+      toggleHideValues();
+    }
+  }, [isViewingOtherCollaborator, hideValues, toggleHideValues]);
 
   const markNotificationRead = useAppStore((state) => state.markNotificationRead);
 
@@ -466,11 +491,19 @@ export default function DashboardLayout({ children, title, subtitle }: Dashboard
               </div>
             )}
 
-            {/* Botão ocultar valores */}
+            {/* Botão ocultar valores – desabilitado se visualizar outro colaborador (exceto SUPER_ADMIN) */}
             <button
               onClick={toggleHideValues}
-              className="hidden sm:inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border border-[#e2e8f0] bg-white text-[#475569] hover:bg-[#f1f5f9] transition-colors"
-              title={hideValues ? "Mostrar valores" : "Ocultar valores"}
+              disabled={isViewingOtherCollaborator}
+              className={cn(
+                "hidden sm:inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border border-[#e2e8f0] bg-white text-[#475569] transition-colors",
+                isViewingOtherCollaborator
+                  ? "opacity-50 cursor-not-allowed"
+                  : "hover:bg-[#f1f5f9]",
+              )}
+              title={isViewingOtherCollaborator
+                ? "Você não pode alterar a visibilidade ao visualizar outro colaborador"
+                : (hideValues ? "Mostrar valores" : "Ocultar valores")}
             >
               {hideValues ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
             </button>

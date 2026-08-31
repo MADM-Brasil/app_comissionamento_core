@@ -92,11 +92,14 @@ const GROUP_MAPPING: Record<string, Level> = {
   'analista de dados': LEVELS.ADMINISTRATIVO,
   'desenvolvedor make': LEVELS.ADMINISTRATIVO,
   'analista de discadora': LEVELS.ADMINISTRATIVO,
+  'Supervisor Sales Ops': LEVELS.ADMINISTRATIVO,
 
   // Super Admin
+
   'desenvolvedor': LEVELS.SUPER_ADMIN,
   'diretora': LEVELS.SUPER_ADMIN,
   'ceo': LEVELS.SUPER_ADMIN,
+  'coordenador salesops': LEVELS.SUPER_ADMIN,
 };
 
 const PERMISSIONS: Record<Level, FullPermissions> = {
@@ -133,11 +136,11 @@ const PERMISSIONS: Record<Level, FullPermissions> = {
     description: 'Visualiza seus próprios dados, Home, Comissões e Ranking',
   },
   [LEVELS.SUPERVISAO]: {
-    canAccessDashboard: true,
-    canAccessComissoes: true,
-    canAccessRanking: true,
-    canAccessReports: true,
-    canAccessConfiguration: true,
+    canAccessDashboard: false, //true
+    canAccessComissoes: false, //true
+    canAccessRanking: false,   //true
+    canAccessReports: false,   //true
+    canAccessConfiguration: false, //true
     canViewTeam: true,
     canEditConfiguration: false,
     canEditBonus: false,

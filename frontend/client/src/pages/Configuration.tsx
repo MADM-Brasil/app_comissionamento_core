@@ -38,9 +38,14 @@ const formatInt = (num: number) => num?.toLocaleString('pt-BR') ?? '0';
 const normalize = (str: string): string =>
   (str || '').trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
 
-// ✅ Função para normalizar cargos (remove acentos, minúsculas)
 const normalizeRole = (str: string): string =>
   (str || '').trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+
+const formatDateOnly = (dateStr: string): string => {
+  if (!dateStr) return '—';
+  const [year, month, day] = dateStr.split('T')[0].split('-');
+  return `${day}/${month}/${year}`;
+};
 
 function formatMonthYear(dateStr: string): string {
   if (!dateStr || !/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) return '--';
@@ -63,23 +68,24 @@ export default function Configuration() {
   const { getAccessLevel, LEVELS } = useAccessControl();
   const userLevel = getAccessLevel();
 
-  //Determinação de permissões baseada no cargo/nível
   const normalizedCargo = normalizeRole(currentUser?.cargo || '');
 
   const isSuperAdmin =
-    normalizedCargo === 'desenvoldor' ||
-    normalizedCargo === 'superadmin' ||
-    normalizedCargo === 'ceo' ||
-    normalizedCargo === 'diretoria' ||
+    normalizedCargo.includes('super admin') ||
+    normalizedCargo.includes('super_admin') ||
+    normalizedCargo.includes('superadmin') ||
+    normalizedCargo.includes('ceo') ||
+    normalizedCargo.includes('diretoria') ||
+    normalizedCargo.includes('desenvolvedor') ||
     userLevel === LEVELS.SUPER_ADMIN;
 
   const isCoordenador =
     normalizedCargo.includes('coordenador') ||
-    normalizedCargo.includes('coordenadora') ||
     userLevel === LEVELS.COORDENADOR;
 
   const isAdministrativo =
     normalizedCargo.includes('administrativo') ||
+    normalizedCargo.includes('administrador') ||
     userLevel === LEVELS.ADMINISTRATIVO;
 
   const isSupervisor =
@@ -88,16 +94,12 @@ export default function Configuration() {
 
   const isAssessor = !(isSuperAdmin || isCoordenador || isAdministrativo || isSupervisor);
 
-  // ✅ Acesso à página: todos exceto assessores
-  // Enquanto o currentUser não está carregado, permitimos (evita redirecionamento prematuro)
   const canAccessConfig = currentUser ? !isAssessor : true;
 
-  // ✅ Permissão de edição: coordenadores, administrativos e super admins
   const canEditConfig = isSuperAdmin || isCoordenador || isAdministrativo;
   const canEditBonus = canEditConfig;
   const canGenerateNextMonth = isSuperAdmin;
 
-  // ✅ Registro de campanhas: coordenadores, administrativos e super admins (não supervisores)
   const canRegisterCampanha = isSuperAdmin || isCoordenador || isAdministrativo;
 
   const isAdminOnly = canEditConfig;
@@ -150,10 +152,26 @@ export default function Configuration() {
   }>>([]);
   const [loadingCampanhas, setLoadingCampanhas] = useState(false);
 
+  // ✅ NOVO: filtros de data para campanhas
+  const [filtroCampanhaInicio, setFiltroCampanhaInicio] = useState<string>(() => {
+    const now = new Date();
+    return new Date(now.getFullYear(), now.getMonth(), 1).toISOString().slice(0, 10);
+  });
+  const [filtroCampanhaFim, setFiltroCampanhaFim] = useState<string>(() => {
+    const now = new Date();
+    return new Date(now.getFullYear(), now.getMonth() + 1, 0).toISOString().slice(0, 10);
+  });
+
   const isAssinados = campanhaCategoria === "Assinados";
+  const isProgressiva = campanhaCategoria === "Progressiva";
+
   useEffect(() => {
     if (isAssinados) {
-      setCampanhaMultiplicador(1.0);
+      // não fixa mais; permite edição do multiplicador
+      // opcional: pode definir um valor padrão inicial se desejar
+      // setCampanhaMultiplicador(5);
+    } else if (isProgressiva) {
+      setCampanhaMultiplicador(3);
     } else {
       if (campanhaMultiplicador === 1.0) {
         setCampanhaMultiplicador(2.0);
@@ -243,20 +261,17 @@ export default function Configuration() {
       });
       const uniqueCollabs = Array.from(uniqueMap.values());
 
-      // Normaliza campos de meta de gols
       uniqueCollabs.forEach((c: any) => {
         c.metaGolsAssinados = c.meta_gols_assinados ?? c.metaGolsAssinados ?? 20;
         c.metaGolsGanhos = c.meta_gols_ganhos ?? c.metaGolsGanhos ?? 20;
       });
 
-      // Carrega métricas do mês selecionado
       const start = month;
       const year = parseInt(month.substring(0, 4), 10);
       const monthIdx = parseInt(month.substring(5, 7), 10) - 1;
       const lastDay = new Date(year, monthIdx + 1, 0).getDate();
       const end = `${month.substring(0, 7)}-${String(lastDay).padStart(2, '0')}`;
 
-      // Totais
       const [emitidos, assinados, ganhos, perdidos, protocolados] = await Promise.all([
         fetchEmitidos({ start, end }),
         fetchAssinados({ start, end }),
@@ -265,13 +280,11 @@ export default function Configuration() {
         fetchProtocolados({ start, end }),
       ]);
 
-      // Dados diários para calcular Gols
       const [dailyAssinados, dailyGanhos] = await Promise.all([
         fetchAssinados({ start, end, granularity: 'daily' }),
         fetchGanhos({ start, end, granularity: 'daily' }),
       ]);
 
-      // Mapa de totais por colaborador
       const metricsMap = new Map<string, { emitidos: number; assinados: number; ganhos: number; perdidos: number; protocolados: number }>();
       const aggregate = (data: any[], key: 'emitidos' | 'assinados' | 'ganhos' | 'perdidos' | 'protocolados') => {
         data.forEach((item: any) => {
@@ -290,7 +303,6 @@ export default function Configuration() {
       aggregate(perdidos, 'perdidos');
       aggregate(protocolados, 'protocolados');
 
-      // Mapa de dados diários por colaborador
       const dailyMap = new Map<string, Map<string, { assinados: number; ganhos: number }>>();
       const processDaily = (data: any[], key: 'assinados' | 'ganhos') => {
         data.forEach((item: any) => {
@@ -306,7 +318,6 @@ export default function Configuration() {
       processDaily(dailyAssinados, 'assinados');
       processDaily(dailyGanhos, 'ganhos');
 
-      // Atualiza colaboradores com métricas e total de gols
       uniqueCollabs.forEach((c: any) => {
         const name = normalize(c.name);
         const metrics = metricsMap.get(name) || { emitidos: 0, assinados: 0, ganhos: 0, perdidos: 0, protocolados: 0 };
@@ -316,7 +327,6 @@ export default function Configuration() {
         c.perdidos = metrics.perdidos;
         c.protocolados = metrics.protocolados;
 
-        // Calcula gols diários
         const dailyData = dailyMap.get(name);
         if (dailyData) {
           const dias = Array.from(dailyData.keys()).sort();
@@ -348,7 +358,7 @@ export default function Configuration() {
     if (selectedMonth) loadCollaboratorsForMonth(selectedMonth);
   }, [selectedMonth]);
 
-  // ========== CARREGAMENTO DE EQUIPES (uma vez) ==========
+  // ========== CARREGAMENTO DE EQUIPES ==========
   const equipesLoaded = useRef(false);
   useEffect(() => {
     if (equipesLoaded.current) return;
@@ -771,7 +781,6 @@ export default function Configuration() {
   return (
     <DashboardLayout title="Configurações" subtitle="Gerencie metas e pesos do sistema">
       <div className="space-y-6">
-        {/* AVISO DE BLOQUEIO + BOTÃO GERAR PRÓXIMO MÊS */}
         {isLocked && (
           <div className="alert-banner warning">
             <CalendarPlus className="w-5 h-5 text-[#EA8C1D] mt-0.5 flex-shrink-0" />
@@ -799,7 +808,6 @@ export default function Configuration() {
           </div>
         )}
 
-        {/* SELETOR DE MÊS */}
         <div className="card flex items-center gap-4 p-4">
           <Calendar className="w-5 h-5 text-[#2F6FED]" />
           <label htmlFor="monthSelect" className="text-sm font-semibold text-[#0f172a]">Mês de referência:</label>
@@ -824,7 +832,7 @@ export default function Configuration() {
           {isLocked && <span className="badge warning">Bloqueado</span>}
         </div>
 
-        {/* CARD: REGISTRAR CAMPANHA COMERCIAL (coordenador, administrativo e super admin) */}
+        {/* CARD: REGISTRAR CAMPANHA COMERCIAL */}
         {canRegisterCampanha && (
           <div className="card">
             <div className="px-5 py-3 border-b border-[#e2e8f0] flex items-center justify-between">
@@ -859,22 +867,37 @@ export default function Configuration() {
                     <option value="outros">Outros</option>
                     <option value="Gols">Gols</option>
                     <option value="Assinados">Assinados</option>
+                    <option value="Progressiva">Progressiva</option>
                   </select>
                 </div>
                 <div>
                   <label htmlFor="campanhaMultiplicador" className="block text-xs font-medium text-[#64748b] mb-1">
-                    {isAssinados ? "Assinados = Gol" : "Multiplicador (1.5 – 2.0)"}
+                    {isAssinados
+                      ? "Assinados por gol"
+                      : isProgressiva
+                        ? "Meta mínima de assinados"
+                        : "Multiplicador (1.5 – 2.0)"}
                   </label>
                   {isAssinados ? (
-                    <div className="flex items-center gap-2">
-                      <input
-                        type="number"
-                        value={campanhaMultiplicador}
-                        disabled
-                        className="w-full px-3 py-2 text-sm rounded-lg border border-[#e2e8f0] bg-gray-100 text-center disabled:opacity-50 cursor-not-allowed"
-                      />
-                      <span className="text-xs text-[#64748b] whitespace-nowrap">(fixo)</span>
-                    </div>
+                    <input
+                      id="campanhaMultiplicador"
+                      type="number"
+                      min={1}
+                      step={1}
+                      value={campanhaMultiplicador}
+                      onChange={(e) => setCampanhaMultiplicador(parseInt(e.target.value) || 1)}
+                      className="w-full px-3 py-2 text-sm rounded-lg border border-[#e2e8f0] bg-white focus:outline-none focus:ring-2 focus:ring-[#2F6FED]/20"
+                    />
+                  ) : isProgressiva ? (
+                    <input
+                      id="campanhaMultiplicador"
+                      type="number"
+                      min={1}
+                      step={1}
+                      value={campanhaMultiplicador}
+                      onChange={(e) => setCampanhaMultiplicador(parseInt(e.target.value) || 1)}
+                      className="w-full px-3 py-2 text-sm rounded-lg border border-[#e2e8f0] bg-white focus:outline-none focus:ring-2 focus:ring-[#2F6FED]/20"
+                    />
                   ) : (
                     <input
                       id="campanhaMultiplicador"
@@ -930,19 +953,34 @@ export default function Configuration() {
               </div>
             </div>
 
-            {/* Lista de campanhas */}
             {mostrarCampanhas && (
               <div className="px-4 pb-4 border-t border-[#e2e8f0] pt-4">
                 <div className="flex items-center justify-between mb-3">
                   <span className="text-xs font-medium text-[#64748b]">
                     {campanhasRegistradas.length} campanha(s) registrada(s)
                   </span>
-                  {loadingCampanhas && <span className="text-xs text-[#94a3b8]">Carregando...</span>}
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="date"
+                      value={filtroCampanhaInicio}
+                      onChange={(e) => setFiltroCampanhaInicio(e.target.value)}
+                      className="px-2 py-1 border border-[#e2e8f0] rounded text-sm"
+                      title="Data inicial"
+                    />
+                    <span className="text-sm text-[#64748b]">até</span>
+                    <input
+                      type="date"
+                      value={filtroCampanhaFim}
+                      onChange={(e) => setFiltroCampanhaFim(e.target.value)}
+                      className="px-2 py-1 border border-[#e2e8f0] rounded text-sm"
+                      title="Data final"
+                    />
+                  </div>
                 </div>
 
                 {campanhasRegistradas.length === 0 ? (
                   <div className="text-center py-6 text-sm text-[#94a3b8]">
-                    Nenhuma campanha registrada neste mês.
+                    Nenhuma campanha registrada neste período.
                   </div>
                 ) : (
                   <div className="overflow-x-auto">
@@ -959,70 +997,75 @@ export default function Configuration() {
                         </tr>
                       </thead>
                       <tbody>
-                        {campanhasRegistradas.map((camp) => {
-                          const chave = `${camp.tipo}-${camp.data_publicacao}-${camp.produto}`;
-                          return (
-                            <tr key={chave}>
-                              <td className="text-xs text-[#64748b]">
-                                {new Date(camp.data_publicacao).toLocaleDateString('pt-BR')}
-                              </td>
-                              <td className="text-xs font-medium">{camp.tipo}</td>
-                              <td className="text-center text-xs font-bold">
-                                {camp.multiplicador.toFixed(1)}x
-                                {camp.tipo === "Assinados" && " (1:1)"}
-                              </td>
-                              <td className="text-xs">{camp.produto}</td>
-                              <td className="text-xs max-w-[150px] truncate" title={camp.descricao}>
-                                {camp.descricao}
-                              </td>
-                              <td className="text-center">
-                                {camp.validacao_financeiro ? (
-                                  <span className="inline-flex items-center gap-1 text-[#16A34A] bg-[#dcfce7] px-2 py-0.5 rounded-full text-[10px] font-medium">
-                                    <Check className="w-3 h-3" /> Aprovada
-                                  </span>
-                                ) : (
-                                  <span className="inline-flex items-center gap-1 text-[#DC2626] bg-[#fee2e2] px-2 py-0.5 rounded-full text-[10px] font-medium">
-                                    <XIcon className="w-3 h-3" /> Pendente
-                                  </span>
-                                )}
-                              </td>
-                              <td className="text-center">
-                                {isSuperAdmin ? (
-                                  <div className="flex items-center justify-center gap-1">
-                                    <button
-                                      onClick={() => handleAprovarCampanha(camp)}
-                                      disabled={camp.validacao_financeiro}
-                                      className={cn(
-                                        "p-1 rounded transition-colors",
-                                        camp.validacao_financeiro
-                                          ? "text-gray-300 cursor-not-allowed"
-                                          : "text-[#16A34A] hover:bg-green-50"
-                                      )}
-                                      title={camp.validacao_financeiro ? "Já aprovada" : "Aprovar campanha"}
-                                    >
-                                      <Check className="w-4 h-4" />
-                                    </button>
-                                    <button
-                                      onClick={() => handleRejeitarCampanha(camp)}
-                                      disabled={!camp.validacao_financeiro}
-                                      className={cn(
-                                        "p-1 rounded transition-colors",
-                                        !camp.validacao_financeiro
-                                          ? "text-gray-300 cursor-not-allowed"
-                                          : "text-[#DC2626] hover:bg-red-50"
-                                      )}
-                                      title={!camp.validacao_financeiro ? "Já rejeitada" : "Rejeitar campanha"}
-                                    >
-                                      <XIcon className="w-4 h-4" />
-                                    </button>
-                                  </div>
-                                ) : (
-                                  <span className="text-xs text-gray-400">—</span>
-                                )}
-                              </td>
-                            </tr>
-                          );
-                        })}
+                        {campanhasRegistradas
+                          .filter((camp) => {
+                            const data = camp.data_publicacao.slice(0, 10);
+                            return (!filtroCampanhaInicio || data >= filtroCampanhaInicio) &&
+                                   (!filtroCampanhaFim || data <= filtroCampanhaFim);
+                          })
+                          .map((camp) => {
+                            const chave = `${camp.tipo}-${camp.data_publicacao}-${camp.produto}`;
+                            return (
+                              <tr key={chave}>
+                                <td className="text-xs text-[#64748b]">
+                                  {formatDateOnly(camp.data_publicacao)}
+                                </td>
+                                <td className="text-xs font-medium">{camp.tipo}</td>
+                                <td className="text-center text-xs font-bold">
+                                  {camp.tipo === "Assinados" ? `a cada ${camp.multiplicador} = 1 gol` : camp.tipo === "Progressiva" ? `mín. ${camp.multiplicador}` : `${camp.multiplicador.toFixed(1)}x`}
+                                </td>
+                                <td className="text-xs">{camp.produto}</td>
+                                <td className="text-xs max-w-[150px] truncate" title={camp.descricao}>
+                                  {camp.descricao}
+                                </td>
+                                <td className="text-center">
+                                  {camp.validacao_financeiro ? (
+                                    <span className="inline-flex items-center gap-1 text-[#16A34A] bg-[#dcfce7] px-2 py-0.5 rounded-full text-[10px] font-medium">
+                                      <Check className="w-3 h-3" /> Aprovada
+                                    </span>
+                                  ) : (
+                                    <span className="inline-flex items-center gap-1 text-[#DC2626] bg-[#fee2e2] px-2 py-0.5 rounded-full text-[10px] font-medium">
+                                      <XIcon className="w-3 h-3" /> Pendente
+                                    </span>
+                                  )}
+                                </td>
+                                <td className="text-center">
+                                  {isSuperAdmin ? (
+                                    <div className="flex items-center justify-center gap-1">
+                                      <button
+                                        onClick={() => handleAprovarCampanha(camp)}
+                                        disabled={camp.validacao_financeiro}
+                                        className={cn(
+                                          "p-1 rounded transition-colors",
+                                          camp.validacao_financeiro
+                                            ? "text-gray-300 cursor-not-allowed"
+                                            : "text-[#16A34A] hover:bg-green-50"
+                                        )}
+                                        title={camp.validacao_financeiro ? "Já aprovada" : "Aprovar campanha"}
+                                      >
+                                        <Check className="w-4 h-4" />
+                                      </button>
+                                      <button
+                                        onClick={() => handleRejeitarCampanha(camp)}
+                                        disabled={!camp.validacao_financeiro}
+                                        className={cn(
+                                          "p-1 rounded transition-colors",
+                                          !camp.validacao_financeiro
+                                            ? "text-gray-300 cursor-not-allowed"
+                                            : "text-[#DC2626] hover:bg-red-50"
+                                        )}
+                                        title={!camp.validacao_financeiro ? "Já rejeitada" : "Rejeitar campanha"}
+                                      >
+                                        <XIcon className="w-4 h-4" />
+                                      </button>
+                                    </div>
+                                  ) : (
+                                    <span className="text-xs text-gray-400">—</span>
+                                  )}
+                                </td>
+                              </tr>
+                            );
+                          })}
                       </tbody>
                     </table>
                   </div>

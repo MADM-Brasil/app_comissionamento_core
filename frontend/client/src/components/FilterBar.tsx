@@ -25,8 +25,9 @@ const normalize = (str: string): string => (str || '').trim().toLowerCase();
 
 const EXCLUDED_TEAMS = [
   'Coordenacao Closer', 'Departamento Backoffice', 'Diretoria','Departamento Marketing',
-  'Equipe Ariana', 'Equipe Erika', 'Equipe Leonardo', 'Equipe Leticia', 'Equipe Michael',
-  'Equipe Thales', 'Equipe Yuri', 'Equipe Rodolfo','Equipe Jennifer','Equipe Natalia', 'Equipe Reciclagem',
+  'Equipe Ariana', 'Equipe Erika', 'Equipe Leonardo', 'Equipe Leticia', 'Equipe Michael','Equipe Erica',
+  'Equipe Thales', 'Equipe Yuri', 'Equipe Rodolfo','Equipe Jennifer','Equipe Natalia','Equipe Maria Eduarda',
+  'Equipe Reciclagem','','Equipe','Equipe Camila','Sales Ops', 'Departamento Comercial', 'Equipe Gabriela Toledo'
 ];
 
 const isExcludedTeam = (teamName: string): boolean => {
@@ -73,6 +74,10 @@ export default function FilterBar({
   const { collaborators, equipeConfigs, setCollaborators, setEquipeConfigs } = useAppStore();
   const { currentUser, getAccessLevel, LEVELS } = useAccessControl();
 
+  // ⚠️ Necessário adicionar esta função na store (dataStore.ts):
+  // setSelectedCollaboratorEmail: (email: string | null) => set({ selectedCollaboratorEmail: email })
+  const setSelectedCollaboratorEmail = useAppStore((state) => (state as any).setSelectedCollaboratorEmail);
+
   // Inicializa estados com valores persistidos (uma única vez)
   const [initialStored] = useState(getStoredFilters);
 
@@ -95,16 +100,29 @@ export default function FilterBar({
   // Obtém a equipe do usuário com fallback para o registro em collaborators
   const userTeam = useMemo(() => {
     if (!currentUser) return '';
-    // 1. Tenta os campos diretos do currentUser
     const direct = (currentUser.equipe || (currentUser as any).equipeNome || (currentUser as any).nome_equipe || '').trim();
     if (direct) return direct;
-    // 2. Fallback: busca nos colaboradores carregados
     if (collaborators.length > 0) {
       const colab = collaborators.find(c => c.id === currentUser.id || c.email === currentUser.email);
       if (colab && colab.equipeNome) return colab.equipeNome.trim();
     }
     return '';
   }, [currentUser, collaborators]);
+
+  // Sincroniza o e-mail do colaborador selecionado na store
+  useEffect(() => {
+    if (!isReady) return;
+    if (selectedColaborador !== "todos") {
+      const selected = collaborators.find(c => c.name === selectedColaborador);
+      if (selected && setSelectedCollaboratorEmail) {
+        setSelectedCollaboratorEmail(selected.email);
+      } else if (setSelectedCollaboratorEmail) {
+        setSelectedCollaboratorEmail(null);
+      }
+    } else {
+      if (setSelectedCollaboratorEmail) setSelectedCollaboratorEmail(null);
+    }
+  }, [selectedColaborador, collaborators, isReady, setSelectedCollaboratorEmail]);
 
   // Atualiza a hora quando os dados ficam prontos
   useEffect(() => {
@@ -333,6 +351,19 @@ export default function FilterBar({
 
   const handleColaboradorChange = (novoColaborador: string) => {
     setSelectedColaborador(novoColaborador);
+    
+    // Atualiza o e-mail do colaborador selecionado na store
+    if (novoColaborador !== "todos") {
+      const selected = collaborators.find(c => c.name === novoColaborador);
+      if (selected && setSelectedCollaboratorEmail) {
+        setSelectedCollaboratorEmail(selected.email);
+      } else if (setSelectedCollaboratorEmail) {
+        setSelectedCollaboratorEmail(null);
+      }
+    } else {
+      if (setSelectedCollaboratorEmail) setSelectedCollaboratorEmail(null);
+    }
+    
     notifyParent(selectedEquipe, novoColaborador, selectedProduto);
   };
 
@@ -374,12 +405,14 @@ export default function FilterBar({
       setSelectedColaborador("todos");
       setSearchTerm("");
       setSelectedProduto("Todos");
+      if (setSelectedCollaboratorEmail) setSelectedCollaboratorEmail(null);
       notifyParent(selectedEquipe, "todos", "Todos");
     } else {
       setSelectedEquipe("todas");
       setSelectedColaborador("todos");
       setSearchTerm("");
       setSelectedProduto("Todos");
+      if (setSelectedCollaboratorEmail) setSelectedCollaboratorEmail(null);
       notifyParent("todas", "todos", "Todos");
     }
   };
