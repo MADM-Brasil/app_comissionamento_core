@@ -53,32 +53,33 @@ const upload = multer({
 router.post('/ticket-movimentacao', async (req, res) => {
   try {
     const {
-  crm_origem = 'CRM',
-  crm_lead_id: rawCrmLeadId = null,
-  lead_id: rawLeadId = null,
-  nome_cliente_informado,
-  sobrenome_cliente_informado,
-  email_cliente_informado,
-  telefone_cliente_informado,
-  cpf_cliente_informado,
-  origem_cliente_informada,
-  tipo_solicitacao = 'Movimentação',
-  colaborador_origem_nome,
-  colaborador_origem_email,
-  equipe_origem_nome,
-  colaborador_destino_nome,
-  colaborador_destino_email,
-  equipe_destino_nome,
-  motivo_solicitacao: rawMotivo = null,
-  observacao_sales_ops: rawObs = null,
-  status_mapeamento = 'pendente',
-  idempotency_key,
-} = req.body;
+      crm_origem = 'CRM',
+      crm_lead_id: rawCrmLeadId = null,
+      lead_id: rawLeadId = null,
+      nome_cliente_informado,
+      sobrenome_cliente_informado,
+      email_cliente_informado,
+      telefone_cliente_informado,
+      cpf_cliente_informado,
+      origem_cliente_informada,
+      tipo_solicitacao = 'Movimentação',
+      colaborador_origem_nome,
+      equipe_origem_nome,
+      colaborador_destino_nome,
+      colaborador_destino_email,  // opcional – será armazenado nos metadados
+      equipe_destino_nome,
+      motivo_solicitacao: rawMotivo = null,
+      observacao_sales_ops: rawObs = null,
+      status_mapeamento = 'pendente',
+      idempotency_key,
+    } = req.body;
 
     // ---------- Validação de campos ----------
     if (!nome_cliente_informado || !sobrenome_cliente_informado || !telefone_cliente_informado) {
       return res.status(400).json({ success: false, error: 'Nome, sobrenome e telefone são obrigatórios.' });
     }
+
+    // Não exigimos e‑mail destino – o worker buscará pelo nome
 
     // ---------- Verificação de idempotência ----------
     if (idempotency_key) {
@@ -119,8 +120,10 @@ router.post('/ticket-movimentacao', async (req, res) => {
       origem_equipe: equipe_origem_nome || '',
       destino_colaborador: colaborador_destino_nome || '',
       destino_equipe: equipe_destino_nome || '',
-      solicitante_email: colaborador_origem_email || req.user?.email || '',
-      solicitante_nome: colaborador_origem_nome || req.user?.nome || '',
+      solicitante_email: req.session.userId || '',
+      solicitante_nome: colaborador_origem_nome || req.session.userId || 'Desconhecido',
+      // Armazena o e‑mail destino (se fornecido) para rastreabilidade
+      colaborador_destino_email: colaborador_destino_email || null,
     };
 
     const baseResult = await pool.query(
@@ -132,7 +135,7 @@ router.post('/ticket-movimentacao', async (req, res) => {
     );
     const ticketId = baseResult.rows[0].id_ticket;
 
-    // 2. Inserir o registro específico da movimentação
+    // 2. Inserir o registro específico da movimentação (SEM colaborador_destino_email)
     const insertMovimentacaoQuery = `
       INSERT INTO app_comissionamento.tickets_movimentacao_lead (
         ticket_id,
@@ -171,7 +174,6 @@ router.post('/ticket-movimentacao', async (req, res) => {
     const movResult = await pool.query(insertMovimentacaoQuery, movValues);
     const movimentacaoId = movResult.rows[0].id_ticket_movimentacao;
 
-    // ==================== RESPOSTA IMEDIATA – FILA ASSUME ====================
     return res.status(202).json({
       success: true,
       message: 'Solicitação de movimentação registrada e enfileirada para processamento.',
@@ -180,88 +182,6 @@ router.post('/ticket-movimentacao', async (req, res) => {
     });
   } catch (err) {
     console.error('Erro ao registrar ticket:', err);
-    return res.status(500).json({ success: false, error: 'Erro interno do servidor.' });
-  }
-});
-
-// ==================== REGISTRO DE TICKET DE SUPORTE (REPORTAR) COM UPLOAD ====================
-router.post('/ticket-suporte', upload.array('arquivos', 5), async (req, res) => {
-  try {
-    const {
-      titulo,
-      assunto,
-      descricao,
-      solicitante_nome,
-      solicitante_email,
-      equipe_nome,
-    } = req.body;
-
-    if (!titulo || !titulo.trim()) {
-      return res.status(400).json({ success: false, error: 'Título é obrigatório.' });
-    }
-    if (!assunto || !descricao) {
-      return res.status(400).json({ success: false, error: 'Assunto e descrição são obrigatórios.' });
-    }
-
-    const solicitanteNome = req.user?.nome || solicitante_nome || 'frontend';
-    const solicitanteEmail = solicitante_email || req.user?.email || '';
-    const equipeNome = req.user?.equipe || equipe_nome || '';
-
-    const arquivos = req.files || [];
-    const baseUrl = `${req.protocol}://${req.get('host')}/uploads/suporte/`;
-    const arquivosComUrl = arquivos.map(file => ({
-      nome: file.originalname,
-      url: baseUrl + file.filename,
-    }));
-
-    const anexosMarkdown = arquivosComUrl.length > 0
-      ? arquivosComUrl.map(a => `[${a.nome}](${a.url})`).join(', ')
-      : 'Nenhum anexo';
-
-    const metadados = {
-      arquivos: arquivosComUrl,
-      solicitante_nome: solicitanteNome,
-      solicitante_email: solicitanteEmail,
-      equipe_nome: equipeNome,
-      observacao_sales_ops: '',
-      assunto: assunto,
-    };
-
-    const result = await pool.query(
-      `INSERT INTO app_comissionamento.tickets_suporte 
-         (solicitante_usuario_id, categoria, tipo_ticket, prioridade, status, titulo, descricao, origem_ticket, encaminhado_em, atualizado_em, metadados)
-       VALUES ($1, $2, 'Reporte', 'NORMAL', 'Aberto', $3, $4, 'suporte comissionamento', NOW(), NOW(), $5)
-       RETURNING id_ticket`,
-      [
-        PLACEHOLDER_UUID,
-        assunto,
-        titulo.trim(),
-        descricao,
-        JSON.stringify(metadados),
-      ]
-    );
-
-    teamsNotificador.enviar({
-      titulo: titulo.trim(),
-      assunto,
-      descricao,
-      solicitante: solicitanteNome,
-      equipe: equipeNome,
-      anexosMarkdown,
-      arquivos: arquivosComUrl,
-    }).then((resNotif) => {
-      console.log('📤 Notificação Teams:', resNotif);
-    }).catch((err) => {
-      console.error('❌ Erro ao enviar notificação Teams:', err);
-    });
-
-    return res.status(201).json({
-      success: true,
-      message: 'Ticket de suporte registado com sucesso.',
-      id_ticket: result.rows[0].id_ticket,
-    });
-  } catch (err) {
-    console.error('Erro ao registar ticket de suporte:', err);
     return res.status(500).json({ success: false, error: 'Erro interno do servidor.' });
   }
 });
@@ -287,6 +207,8 @@ router.get('/tickets-movimentacao', async (req, res) => {
         COALESCE(ts.metadados->>'origem_equipe', '') AS equipe_origem_nome,
         tml.colaborador_destino_nome,
         COALESCE(ts.metadados->>'destino_equipe', '') AS equipe_destino_nome,
+        -- O e-mail destino está nos metadados (opcional)
+        COALESCE(ts.metadados->>'colaborador_destino_email', '') AS colaborador_destino_email,
         tml.status_mapeamento,
         tml.observacao_sales_ops,
         tml.motivo_solicitacao,
@@ -369,6 +291,86 @@ router.get('/ticket-suporte', async (req, res) => {
   }
 });
 
+// ==================== REGISTRO DE TICKET DE SUPORTE (REPORTAR) COM UPLOAD ====================
+router.post('/ticket-suporte', upload.array('arquivos', 5), async (req, res) => {
+  try {
+    const {
+      titulo,
+      assunto,
+      descricao,
+      solicitante_nome,
+      solicitante_email,
+      equipe_nome,
+    } = req.body;
+
+    if (!titulo || !titulo.trim()) {
+      return res.status(400).json({ success: false, error: 'Título é obrigatório.' });
+    }
+    if (!assunto || !descricao) {
+      return res.status(400).json({ success: false, error: 'Assunto e descrição são obrigatórios.' });
+    }
+
+    const solicitanteNome = req.user?.nome || solicitante_nome || 'frontend';
+    const solicitanteEmail = solicitante_email || req.user?.email || req.session.userId || '';
+    const equipeNome = req.user?.equipe || equipe_nome || '';
+
+    const arquivos = req.files || [];
+    const baseUrl = `${req.protocol}://${req.get('host')}/uploads/suporte/`;
+    const arquivosComUrl = arquivos.map(file => ({
+      nome: file.originalname,
+      url: baseUrl + file.filename,
+    }));
+
+    const anexosMarkdown = arquivosComUrl.length > 0
+      ? arquivosComUrl.map(a => `[${a.nome}](${a.url})`).join(', ')
+      : 'Nenhum anexo';
+
+    const metadados = {
+      arquivos: arquivosComUrl,
+      solicitante_nome: solicitanteNome,
+      solicitante_email: solicitanteEmail,
+      equipe_nome: equipeNome,
+      observacao_sales_ops: '',
+      assunto: assunto,
+    };
+
+    const result = await pool.query(
+      `INSERT INTO app_comissionamento.tickets_suporte 
+         (solicitante_usuario_id, categoria, tipo_ticket, prioridade, status, titulo, descricao, origem_ticket, encaminhado_em, atualizado_em, metadados)
+       VALUES ($1, $2, 'Reporte', 'NORMAL', 'Aberto', $3, $4, 'suporte comissionamento', NOW(), NOW(), $5)
+       RETURNING id_ticket`,
+      [
+        PLACEHOLDER_UUID,
+        assunto,
+        titulo.trim(),
+        descricao,
+        JSON.stringify(metadados),
+      ]
+    );
+
+    teamsNotificador.enviar({
+      titulo: titulo.trim(),
+      assunto,
+      descricao,
+      solicitante: solicitanteNome,
+      equipe: equipeNome,
+      anexosMarkdown,
+      arquivos: arquivosComUrl,
+    }).catch((err) => {
+      console.error('❌ Erro ao enviar notificação Teams:', err);
+    });
+
+    return res.status(201).json({
+      success: true,
+      message: 'Ticket de suporte registado com sucesso.',
+      id_ticket: result.rows[0].id_ticket,
+    });
+  } catch (err) {
+    console.error('Erro ao registar ticket de suporte:', err);
+    return res.status(500).json({ success: false, error: 'Erro interno do servidor.' });
+  }
+});
+
 // ==================== ATUALIZAÇÃO DE TICKET DE MOVIMENTAÇÃO ====================
 router.patch('/tickets-movimentacao/:id', async (req, res) => {
   try {
@@ -429,11 +431,9 @@ router.patch('/tickets-movimentacao/:id', async (req, res) => {
         return res.status(404).json({ success: false, error: 'Ticket de movimentação não encontrado.' });
       }
 
-      // Sincroniza status com tickets_suporte
       if (status_mapeamento !== undefined) {
         const ticketId = movResult.rows[0].ticket_id;
         const mappedStatus = STATUS_MAP[status_mapeamento] || status_mapeamento;
-
         if (status_mapeamento === 'concluido') {
           await client.query(
             `UPDATE app_comissionamento.tickets_suporte
@@ -451,7 +451,6 @@ router.patch('/tickets-movimentacao/:id', async (req, res) => {
         }
       }
 
-      // Notificação SSE
       try {
         const ticketInfo = await client.query(
           `SELECT ts.titulo, ts.metadados->>'solicitante_email' AS solicitante_email
@@ -535,7 +534,6 @@ router.patch('/tickets-suporte/:id', async (req, res) => {
       return res.status(404).json({ success: false, error: 'Ticket de suporte não encontrado.' });
     }
 
-    // Notificação SSE
     try {
       const ticketResult = await pool.query(
         `SELECT titulo, metadados->>'solicitante_email' AS solicitante_email
@@ -566,36 +564,6 @@ router.patch('/tickets-suporte/:id', async (req, res) => {
   } catch (err) {
     console.error('Erro ao atualizar ticket de suporte:', err);
     return res.status(500).json({ success: false, error: 'Erro interno do servidor.' });
-  }
-});
-
-// ==================== REPROCESSAR TICKET DE MOVIMENTAÇÃO ====================
-router.post('/tickets-movimentacao/:id/reprocessar', async (req, res) => {
-  try {
-    const { id } = req.params;
-    const result = await pool.query(
-      `SELECT observacao_sales_ops FROM app_comissionamento.tickets_movimentacao_lead WHERE id_ticket_movimentacao = $1`,
-      [id]
-    );
-    if (result.rowCount === 0) {
-      return res.status(404).json({ success: false, error: 'Ticket não encontrado' });
-    }
-
-    let obs = {};
-    try { obs = JSON.parse(result.rows[0].observacao_sales_ops || '{}'); } catch { obs = {}; }
-    delete obs.processado;
-
-    await pool.query(
-      `UPDATE app_comissionamento.tickets_movimentacao_lead
-       SET status_mapeamento = 'pendente', observacao_sales_ops = $1, atualizado_em = NOW()
-       WHERE id_ticket_movimentacao = $2`,
-      [JSON.stringify(obs), id]
-    );
-
-    return res.json({ success: true, message: 'Ticket reenfileirado.' });
-  } catch (err) {
-    console.error('Erro ao reprocessar:', err);
-    return res.status(500).json({ success: false, error: 'Erro interno' });
   }
 });
 
